@@ -2,6 +2,9 @@ import peasy.*;
 import hypermedia.net.*;
 import java.util.concurrent.*;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
 PShader conway;
 PGraphics pg;
 
@@ -11,9 +14,12 @@ DemoTransmitter demoTransmitter;
 Boolean demoMode = true;
 BlockingQueue<PImage> newImageQueue;
 
+final Lock graphicsLock = new ReentrantLock();  // obtain before using loadpixels()
+
 UDP udp;
 
 PShape panel;
+PShape panelShroud;
 
 int ledsPerPanelX = 16;    // Number of LEDs per panel in the x direction
 int ledsPerPanelY = 32;    // Number of LEDs per panel in the y direction
@@ -63,6 +69,11 @@ void setup() {
   panel = createShape();
   panel.beginShape(QUADS);
   panel.texture(pg);
+  
+  panelShroud = createShape();
+  panelShroud.beginShape(QUADS);
+  panelShroud.fill(0);
+  panelShroud.stroke(0,0,0);
 
   for (int j = 0; j < panelYSegments; j++) {
     for (int i = 0; i < panelXSegments; i++) {
@@ -81,14 +92,43 @@ void setup() {
       float texYStart =     j*ledsPerPanelY;
       float texYEnd =   (j+1)*ledsPerPanelY - 1;
 
+      // Add the visible outside of the display
       panel.vertex(xStart, yStart, zStart, texXStart, texYStart);
       panel.vertex(  xEnd, yStart, zEnd, texXEnd, texYStart);
       panel.vertex(  xEnd, yEnd, zEnd, texXEnd, texYEnd);
       panel.vertex(xStart, yEnd, zStart, texXStart, texYEnd);
+      
+      // And a black back, because the display isn't visible from the inside
+      float scale = .96;
+
+      //Interior wall      
+      panelShroud.vertex(xStart*scale, yEnd, zStart*scale);
+      panelShroud.vertex(  xEnd*scale, yEnd, zEnd*scale);
+      panelShroud.vertex(  xEnd*scale, yStart, zEnd*scale);
+      panelShroud.vertex(xStart*scale, yStart, zStart*scale);
+      
+      // Bottom wall
+      if(j == 0) {
+        panelShroud.vertex(xStart,       yStart, zStart);
+        panelShroud.vertex(  xEnd,       yStart, zEnd);
+        panelShroud.vertex(  xEnd*scale, yStart, zEnd*scale);
+        panelShroud.vertex(xStart*scale, yStart, zStart*scale);
+      }
+      // Top wall
+      if(j == panelYSegments -1) {
+        panelShroud.vertex(xStart,       yEnd, zStart);
+        panelShroud.vertex(  xEnd,       yEnd, zEnd);
+        panelShroud.vertex(  xEnd*scale, yEnd, zEnd*scale);
+        panelShroud.vertex(xStart*scale, yEnd, zStart*scale);
+      }
+//      
+      // Note that we could add some more verticies to close up the edges between
+      // the interior and exterior panels, but it doesn't really seem visible.
     }
   }
 
   panel.endShape(CLOSE);
+  panelShroud.endShape(CLOSE);
 
   cam = new PeasyCam(this, 0, 50, 0, 1000);
   cam.setMinimumDistance(2);
@@ -108,14 +148,21 @@ void draw() {
 
   background(30);
   
+  
   if (newImageQueue.size() > 0) {
-    PImage newImage = newImageQueue.remove();
-    pg.beginDraw();
-    pg.image(newImage,0,0);
-    pg.endDraw();
+//    graphicsLock.lock();  // block until condition holds
+//    try {  
+      PImage newImage = newImageQueue.remove();
+      pg.beginDraw();
+      pg.image(newImage,0,0);
+      pg.endDraw();
+//    } finally {
+//      graphicsLock.unlock();
+//    }
   }
 
   scale(2);
+  shape(panelShroud, 0, 0);
   shape(panel, 0, 0);
 }
 
@@ -139,19 +186,27 @@ void receive(byte[] data, String ip, int port) {
 
   if (frameInProgress == null) {
     frameInProgress = createImage(int(imageWidth), int(imageHeight), RGB);
-    frameInProgress.loadPixels();
+//    frameInProgress.loadPixels();
   }
   
   int part = data[0];
   int offset = pixelsPerPacket*part;
   int doff = 1;
-  for (int idx = 0; idx < pixelsPerPacket; idx++) {
-    frameInProgress.pixels[offset] = (int)(0xff<<24
-                                   |  convertByte(data[doff + 0])<<16)
-                                   | (convertByte(data[doff + 1])<<8)
-                                   | (convertByte(data[doff + 2]));
-    offset += 1;
-    doff += 3;
+  
+  graphicsLock.lock();  // block until condition holds
+  try {
+    frameInProgress.loadPixels();
+    for (int idx = 0; idx < pixelsPerPacket; idx++) {
+      frameInProgress.pixels[offset] = (int)(0xff<<24
+                                     |  convertByte(data[doff + 0])<<16)
+                                     | (convertByte(data[doff + 1])<<8)
+                                     | (convertByte(data[doff + 2]));
+      offset += 1;
+      doff += 3;
+    }
+    frameInProgress.updatePixels();
+  } finally {
+    graphicsLock.unlock();
   }
 
   if (part == packetsPerFrame-1) {
@@ -159,7 +214,7 @@ void receive(byte[] data, String ip, int port) {
       println("Buffer full, dropping frame!");
       return;
     }
-    frameInProgress.updatePixels();
+//    frameInProgress.updatePixels();
     try { 
       newImageQueue.put(frameInProgress);
     } 
